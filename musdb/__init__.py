@@ -7,7 +7,7 @@ import numpy as np
 import functools
 import zipfile
 import yaml
-import musdb
+#import musdb #How can this make sense? Why am I importing musdb
 import errno
 import os
 
@@ -71,22 +71,17 @@ class DB(object):
     """
     def __init__(
         self,
-        root=None,
+        root=None, # local path to the leakage removal dataset
         setup_file=None,
         is_wav=False,
-        download=False,
         subsets=['train', 'test'],
         split=None,
-        sample_rate=None
+        sample_rate=None, 
+        data_path=None, 
+        instrument='drums', 
     ):
         if root is None:
-            if download:
-                self.root = os.path.expanduser("~/MUSDB18/MUSDB18-7")
-            else:
-                if "MUSDB_PATH" in os.environ:
-                    self.root = os.environ["MUSDB_PATH"]
-                else:
-                    raise RuntimeError("Variable `MUSDB_PATH` has not been set.")
+            raise RuntimeError("Variable `MUSDB_PATH` has not been set.")
         else:
             self.root = os.path.expanduser(root)
 
@@ -94,24 +89,20 @@ class DB(object):
             setup_path = op.join(self.root, setup_file)
         else:
             setup_path = os.path.join(
-                musdb.__path__[0], 'configs', 'mus.yaml'
+                root, 'configs', 'mus.yaml'
             )
 
         with open(setup_path, 'r') as f:
             self.setup = yaml.safe_load(f)
 
-        if download:
-            self.url = self.setup['sample-url']
-            self.download()
-            if not self._check_exists():
-                raise RuntimeError('Dataset not found.' +
-                                   'You can use download=True to download a sample version of the dataset')
-
         if sample_rate != self.setup['sample_rate']:
             self.sample_rate = sample_rate
+
         self.sources_names = list(self.setup['sources'].keys())
         self.targets_names = list(self.setup['targets'].keys())
         self.is_wav = is_wav
+        self.data_path = data_path
+        self.instrument = instrument
         self.tracks = self.load_mus_tracks(subsets=subsets, split=split)
 
     def __getitem__(self, index):
@@ -120,27 +111,7 @@ class DB(object):
     def __len__(self):
         return len(self.tracks)
 
-    def get_validation_track_indices(self, validation_track_names=None):
-        """Returns validation track indices by a given list of track names
-
-        Defaults to the builtin selection 8 validation tracks, defined in
-        `mus.yaml`.
-
-        Parameters
-        == == == == ==
-        validation_track_names : list[str], optional
-            validation track names by a given `str` or list of tracknames
-
-        Returns
-        -------
-        list[int]
-            return a list of validation track indices
-        """
-        if validation_track_names is None:
-            validation_track_names = self.setup['validation_tracks']
-        
-        return self.get_track_indices_by_names(validation_track_names)
-
+    #If needed, I can re-copy the get-validation-track-indeces function
     def get_track_indices_by_names(self, names):
         """Returns musdb track indices by track name
 
@@ -162,6 +133,7 @@ class DB(object):
         
         return [[t.name for t in self.tracks].index(name) for name in names]
 
+    #I will not delete the stuff related to train, but this code is not meant to be used for anything other than test.
     def load_mus_tracks(self, subsets=None, split=None):
         """Parses the musdb folder structure, returns list of `Track` objects
 
@@ -191,10 +163,9 @@ class DB(object):
             raise RuntimeError("Subset has to set to `train` when split is used")
 
         tracks = []
-        for subset in subsets:            
-            subset_folder = op.join(self.root, subset)
-
-            for _, folders, files in os.walk(subset_folder):
+        for subset in subsets:
+            subset_folder = op.join(self.data_path, subset)
+            for _, folders, files in os.walk(op.join(subset_folder, self.instrument)):
                 if self.is_wav:
                     # parse pcm tracks and sort by name
                     for track_name in sorted(folders):
@@ -204,86 +175,47 @@ class DB(object):
                             elif split == 'valid' and track_name not in self.setup['validation_tracks']:
                                 continue
 
-                        track_folder = op.join(subset_folder, track_name)
-                        # create new mus track
-                        track = MultiTrack(
-                            name=track_name,
-                            path=op.join(
-                                track_folder,
-                                self.setup['mixture']
-                            ),
-                            subset=subset,
-                            is_wav=self.is_wav,
-                            stem_id=self.setup['stem_ids']['mixture'],
-                            sample_rate=self.sample_rate
-                        )
-
-                        # add sources to track
-                        sources = {}
-                        for src, source_file in list(
-                            self.setup['sources'].items()
-                        ):
-                            # create source object
-                            abs_path = op.join(
-                                track_folder,
-                                source_file
-                            )
-                            if os.path.exists(abs_path):
-                                sources[src] = Source(
-                                    track,
-                                    name=src,
-                                    path=abs_path,
-                                    stem_id=self.setup['stem_ids'][src],
+                        track_folder = op.join(subset_folder, self.instrument, track_name)
+                        # track_number (in the modified leakage removal, there are additional subfolders from 0 - 9
+                        for lvl2_, lvl2_folders, lvl2_files in os.walk(track_folder): 
+                            for folder_num in sorted(lvl2_folders): 
+                                # create new mus track
+                                track = MultiTrack(
+                                    name=track_name,
+                                    path=op.join(
+                                        track_folder,
+                                        folder_num,
+                                        self.setup['mixture']
+                                    ),
+                                    subset=subset,
+                                    is_wav=self.is_wav,
+                                    stem_id=self.setup['stem_ids']['mixture'],
                                     sample_rate=self.sample_rate
                                 )
-                        track.sources = sources
-                        track.targets = self.create_targets(track)
 
-                        # add track to list of tracks
-                        tracks.append(track)
-                else:
-                    # parse stem files
-                    for track_name in sorted(files):
-                        if not track_name.endswith('.stem.mp4'):
-                            continue
-                        if subset == 'train':
-                            if split == 'train' and track_name.split('.stem.mp4')[0] in self.setup['validation_tracks']:
-                                continue
-                            elif split == 'valid' and track_name.split('.stem.mp4')[0] not in self.setup['validation_tracks']:
-                                continue
-
-                        # create new mus track
-                        track = MultiTrack(
-                            name=track_name.split('.stem.mp4')[0],
-                            path=op.join(subset_folder, track_name),
-                            subset=subset,
-                            stem_id=self.setup['stem_ids']['mixture'],
-                            is_wav=self.is_wav,
-                            sample_rate=self.sample_rate
-                        )
-                        # add sources to track
-                        sources = {}
-                        for src, source_file in list(
-                            self.setup['sources'].items()
-                        ):
-                            # create source object
-                            abs_path = op.join(
-                                subset_folder,
-                                track_name
-                            )
-                            if os.path.exists(abs_path):
-                                sources[src] = Source(
-                                    track,
-                                    name=src,
-                                    path=abs_path,
-                                    stem_id=self.setup['stem_ids'][src],
-                                    sample_rate=self.sample_rate
-                                )
-                        track.sources = sources
-
-                        # add targets to track
-                        track.targets = self.create_targets(track)
-                        tracks.append(track)
+                                # add sources to track
+                                sources = {}
+                                for src, source_file in list(
+                                    self.setup['sources'].items()
+                                ):
+                                    # create source object
+                                    abs_path = op.join(
+                                        track_folder,
+                                        folder_num, 
+                                        source_file
+                                    )
+                                    if os.path.exists(abs_path):
+                                        sources[src] = Source(
+                                        track,
+                                        name=src,
+                                        path=abs_path,
+                                        stem_id=self.setup['stem_ids'][src],
+                                        sample_rate=self.sample_rate
+                                    )
+                                track.sources = sources
+                                track.targets = self.create_targets(track)
+                                # add track to list of tracks
+                                tracks.append(track)
 
         return tracks
 
@@ -308,7 +240,6 @@ class DB(object):
                     sources=target_sources,
                     name=name
                 )
-
         return targets
 
     def save_estimates(
@@ -351,29 +282,4 @@ class DB(object):
     def _check_exists(self):
         return os.path.exists(os.path.join(self.root, "train"))
 
-    def download(self):
-        """Download the MUSDB Sample data"""
-        if self._check_exists():
-            return
-
-        # download files
-        try:
-            os.makedirs(os.path.join(self.root))
-        except OSError as e:
-            if e.errno == errno.EEXIST:
-                pass
-            else:
-                raise
-
-        print('Downloading MUSDB 7s Sample Dataset to %s...' % self.root)
-        data = urllib.request.urlopen(self.url)
-        filename = 'MUSDB18-7-STEMS.zip'
-        file_path = os.path.join(self.root, filename)
-        with open(file_path, 'wb') as f:
-            f.write(data.read())
-        zip_ref = zipfile.ZipFile(file_path, 'r')
-        zip_ref.extractall(os.path.join(self.root))
-        zip_ref.close()
-        os.unlink(file_path)
-
-        print('Done!')
+    #Maybe I should add a sample downloader for the leakage removal dataset
